@@ -1,0 +1,22 @@
+panel_blocks:
+  - block_name: PANEL
+    panel_type: "ТП ПКМ"
+    width_mm_attr: WIDTH
+    length_mm_attr: LENGTH
+    thickness_mm_attr: THICK
+    qty_attr: QTY
+    ral_out_attr: RAL_OUT
+    metal_out_mm_attr: METAL_OUT
+    profile_out_attr: PROFILE_OUT
+    coating_out: "ПЭ"
+    ral_in_attr: RAL_IN
+    metal_in_mm_attr: METAL_IN
+    profile_in_attr: PROFILE_IN
+    coating_in: "ПЭ"
+
+defaults:
+  width_mm: 1000
+  thickness_mm: 200
+  qty: 1
+  panel_type: "ТП ПКМ"
+

@@ -1,0 +1,29 @@
+
+defaults:
+  width_mm: 1190
+  thickness_mm: 150
+  qty: 1
+  panel_type: "ТП СПСК"
+  ral_out: "7024"
+  metal_out_mm: 0.5
+  coating_out: "PE"
+  ral_in: "9003"
+  metal_in_mm: 0.5
+  coating_in: "PE"
+
+tag_extraction:
+  enabled: true
+  dwg_load_version: "2018"
+  # Matches "п 612", "с-598", "Т 100" etc.
+  tag_regex: "\\b([пстc])\\s*[-]?\\s*(\\d{2,4})\\b"
+  prefix_width_map:
+    "п": 1190
+    "p": 1190
+    "с": 1000
+    "c": 1000
+    "т": 1000
+    "t": 1000
+  default_width_mm: 1190
+  # Leave empty to scan all layers, or specify list
+  layers: [] 
+  exclude_layers: []
