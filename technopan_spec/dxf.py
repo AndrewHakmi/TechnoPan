@@ -3,15 +3,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 import os
 import re
 import math
+import threading
 
 import ezdxf
 
 from .config import Config, PanelBlockRule
 from .odafc_utils import resolve_odafc_win_exec_path
+
+# Callable type alias for progress logging
+ProgressCb = Callable[[str], None]
 
 
 @dataclass(frozen=True)
@@ -65,31 +69,232 @@ def _find_rule(cfg: Config, block_name: str) -> PanelBlockRule | None:
     return None
 
 
-def _load_doc(path: Path, *, dwg_version: str | None = None):
+def _noop(msg: str) -> None:
+    pass
+
+
+def _load_doc(
+    path: Path,
+    *,
+    dwg_version: str | None = None,
+    progress_cb: ProgressCb = _noop,
+):
     ext = path.suffix.lower()
     if ext == ".dxf":
+        progress_cb(f"Чтение DXF: {path.name}")
         return ezdxf.readfile(path)
 
     if ext in {".dwg", ".dxb"}:
         from ezdxf.addons import odafc
 
         win_path = resolve_odafc_win_exec_path()
+        progress_cb(f"ODA File Converter: {'найден — ' + win_path if win_path else 'НЕ НАЙДЕН'}")
         if win_path:
             ezdxf.options.set("odafc-addon", "win_exec_path", win_path)
 
         if not odafc.is_installed():
             raise RuntimeError(
-                "Для чтения DWG требуется установленный ODA File Converter. "
-                "Установите его и задайте переменную окружения ODA_FILE_CONVERTER_EXE "
-                "(путь к ODAFileConverter.exe), либо настройте путь в конфиге ezdxf."
+                "Для чтения DWG требуется ODA File Converter.\n"
+                "Скачайте: https://www.opendesign.com/guestfiles/oda_file_converter\n"
+                "Затем задайте переменную окружения ODA_FILE_CONVERTER_EXE (путь к ODAFileConverter.exe)."
             )
 
+        progress_cb(f"Конвертация DWG → DXF (ODA)… это может занять 30–60 секунд")
         if dwg_version:
-            return odafc.readfile(path, version=dwg_version)
-        return odafc.readfile(path)
+            doc = odafc.readfile(path, version=dwg_version)
+        else:
+            doc = odafc.readfile(path)
+        progress_cb("Конвертация завершена.")
+        return doc
 
     raise ValueError(f"Неподдерживаемый формат входного файла: {ext}")
 
+
+# ---------------------------------------------------------------------------
+# Auto-detection
+# ---------------------------------------------------------------------------
+
+# Regex for tag-style panel codes: "п 612", "с-498", "т 146", "в 346"
+_TAG_RE = re.compile(r'(?:^|(?<=\s))([пстcвПСТCВ])\s*[-]?\s*(\d{2,4})(?=\s|$)', re.UNICODE)
+
+# Regex for dimension-mode markers: "в 346", "в346"
+_DIM_MARKER_RE = re.compile(r'^в\s*(\d+)$', re.IGNORECASE | re.UNICODE)
+
+# Typical dimension layer names
+_DIM_LAYER_HINTS = {"_размеры", "размеры", "сендвичи_размеры", "dimension"}
+
+
+@dataclass
+class AutoDetectResult:
+    recommended_config: str          # filename like "text_tags.yml"
+    mode: str                        # "tag", "dimension", "attribute", "unknown"
+    summary: str                     # human-readable explanation
+    details: list[str]               # per-line diagnostic info
+    entity_counts: dict[str, int]
+    layers: dict[str, int]           # layer → count
+    text_samples: list[str]          # first N text strings found
+    tag_count: int
+    dim_marker_count: int
+    insert_count: int
+
+
+def auto_detect_config(
+    path: Path,
+    *,
+    progress_cb: ProgressCb = _noop,
+    stop_event: threading.Event | None = None,
+) -> AutoDetectResult:
+    """
+    Scan the DXF/DWG file and recommend which config/mode to use.
+    Does NOT require a Config object — uses heuristics only.
+    """
+    progress_cb("Автоопределение режима…")
+
+    doc = _load_doc(path, progress_cb=progress_cb)
+    msp = doc.modelspace()
+
+    if stop_event and stop_event.is_set():
+        raise InterruptedError("Остановлено пользователем")
+
+    progress_cb("Сканирование сущностей…")
+
+    from collections import Counter
+    entity_counts: Counter[str] = Counter()
+    layer_counts: Counter[str] = Counter()
+    text_samples: list[str] = []
+    tag_texts: list[tuple[str, str, str]] = []   # (layer, text, prefix+num)
+    dim_marker_texts: list[tuple[str, str]] = []
+    insert_blocks: Counter[str] = Counter()
+    dim_layers_found: set[str] = set()
+
+    for e in msp:
+        if stop_event and stop_event.is_set():
+            raise InterruptedError("Остановлено пользователем")
+
+        etype = e.dxftype()
+        entity_counts[etype] += 1
+        try:
+            layer = str(e.dxf.layer)
+        except Exception:
+            layer = ""
+        layer_counts[layer] += 1
+
+        if etype in ("TEXT", "MTEXT"):
+            if etype == "MTEXT":
+                try:
+                    text = e.plain_mtext().strip()
+                except Exception:
+                    text = str(e.dxf.text).strip()
+            else:
+                text = str(e.dxf.text).strip()
+
+            if text and len(text_samples) < 20:
+                text_samples.append(f"[{layer}] {text!r}")
+
+            # Check for panel tags
+            matches = _TAG_RE.findall(text)
+            for prefix, number in matches:
+                tag_texts.append((layer, text, f"{prefix}-{number}"))
+
+            # Check for dimension markers ("в 346")
+            if _DIM_MARKER_RE.match(text):
+                dim_marker_texts.append((layer, text))
+
+        elif etype == "DIMENSION":
+            layer_lo = layer.lower()
+            if any(hint in layer_lo for hint in _DIM_LAYER_HINTS):
+                dim_layers_found.add(layer)
+
+        elif etype == "INSERT":
+            try:
+                insert_blocks[str(e.dxf.name)] += 1
+            except Exception:
+                pass
+
+    # ── Decision logic ──────────────────────────────────────────────────────
+    details: list[str] = []
+    details.append(f"Файл: {path.name}")
+    details.append(f"Типы сущностей: " + ", ".join(
+        f"{t}={n}" for t, n in entity_counts.most_common(8)
+    ))
+    details.append(f"Слоёв: {len(layer_counts)}, топ-8: " + ", ".join(
+        f"{l!r}({n})" for l, n in layer_counts.most_common(8)
+    ))
+    details.append(f"TEXT-тегов найдено: {len(tag_texts)}")
+    details.append(f"Маркеров dimension-режима: {len(dim_marker_texts)}")
+    details.append(f"INSERT-блоков: {sum(insert_blocks.values())} уник={len(insert_blocks)}")
+
+    # Sample unique tags
+    unique_tags = sorted({t[2] for t in tag_texts})
+    if unique_tags:
+        sample = unique_tags[:12]
+        details.append("Примеры тегов: " + ", ".join(sample))
+
+    # Sample unique dim markers
+    if dim_marker_texts:
+        details.append("Примеры dimension-маркеров: " + ", ".join(
+            t[1] for t in dim_marker_texts[:8]
+        ))
+
+    if dim_layers_found:
+        details.append("DIMENSION слои: " + ", ".join(sorted(dim_layers_found)))
+
+    # Determine mode
+    has_tags = len(tag_texts) >= 3
+    has_dim = len(dim_marker_texts) >= 1 and len(dim_layers_found) >= 1
+    has_insert_attribs = sum(insert_blocks.values()) >= 5
+
+    if has_tags:
+        mode = "tag"
+        recommended = "text_tags.yml"
+        summary = (
+            f"Найдено {len(tag_texts)} текстовых тегов панелей "
+            f"({len(unique_tags)} уникальных: {', '.join(unique_tags[:6])}{'…' if len(unique_tags)>6 else ''}). "
+            f"Рекомендован режим: text_tags."
+        )
+    elif has_dim:
+        mode = "dimension"
+        recommended = "abk_dimensions.yml"
+        summary = (
+            f"Найдено {len(dim_marker_texts)} маркеров dimension-режима "
+            f"на слоях: {', '.join(sorted(dim_layers_found))}. "
+            f"Рекомендован режим: dimension."
+        )
+    elif has_insert_attribs:
+        mode = "attribute"
+        recommended = "default.yml"
+        summary = (
+            f"Найдено {sum(insert_blocks.values())} INSERT-блоков. "
+            f"Рекомендован режим: attribute (default)."
+        )
+    else:
+        mode = "unknown"
+        recommended = "default.yml"
+        summary = (
+            "Не удалось автоматически определить режим. "
+            "Проверьте файл и конфиг вручную."
+        )
+
+    details.append(f"→ Рекомендован: {recommended} (режим: {mode})")
+    progress_cb(f"Автоопределение: {summary}")
+
+    return AutoDetectResult(
+        recommended_config=recommended,
+        mode=mode,
+        summary=summary,
+        details=details,
+        entity_counts=dict(entity_counts),
+        layers=dict(layer_counts),
+        text_samples=text_samples,
+        tag_count=len(tag_texts),
+        dim_marker_count=len(dim_marker_texts),
+        insert_count=sum(insert_blocks.values()),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Inspection
+# ---------------------------------------------------------------------------
 
 def inspect_dxf(path: Path) -> dict[str, dict[str, Any]]:
     doc = _load_doc(path)
@@ -108,23 +313,163 @@ def inspect_dxf(path: Path) -> dict[str, dict[str, Any]]:
     return result
 
 
-def extract_panels_from_dxf(path: Path, cfg: Config) -> list[PanelItem]:
+# ---------------------------------------------------------------------------
+# Main extraction dispatcher
+# ---------------------------------------------------------------------------
+
+def extract_panels_from_dxf(
+    path: Path,
+    cfg: Config,
+    *,
+    progress_cb: ProgressCb = _noop,
+    stop_event: threading.Event | None = None,
+) -> list[PanelItem]:
     if cfg.tag_extraction.enabled:
-        return extract_panels_from_tags(path, cfg)
+        return extract_panels_from_tags(path, cfg, progress_cb=progress_cb, stop_event=stop_event)
 
     if cfg.dimension_extraction.enabled:
-        return extract_panels_from_dimensions(path, cfg)
+        return extract_panels_from_dimensions(path, cfg, progress_cb=progress_cb, stop_event=stop_event)
 
-    doc = _load_doc(path)
+    return _extract_panels_attribute(path, cfg, progress_cb=progress_cb, stop_event=stop_event)
+
+
+def _check_stop(stop_event: threading.Event | None) -> None:
+    if stop_event and stop_event.is_set():
+        raise InterruptedError("Остановлено пользователем")
+
+
+# ---------------------------------------------------------------------------
+# Tag-based extraction
+# ---------------------------------------------------------------------------
+
+def extract_panels_from_tags(
+    path: Path,
+    cfg: Config,
+    *,
+    progress_cb: ProgressCb = _noop,
+    stop_event: threading.Event | None = None,
+) -> list[PanelItem]:
+    tag_cfg = cfg.tag_extraction
+    regex = re.compile(tag_cfg.tag_regex, re.IGNORECASE)
+
+    doc = _load_doc(path, dwg_version=tag_cfg.dwg_load_version, progress_cb=progress_cb)
+    _check_stop(stop_event)
+
     msp = doc.modelspace()
     items: list[PanelItem] = []
 
+    progress_cb("Поиск текстовых тегов (TEXT/MTEXT)…")
+    scanned = 0
+    skipped_layer = 0
+    no_match = 0
+    matched_total = 0
+
+    for e in msp:
+        _check_stop(stop_event)
+        if e.dxftype() not in ("TEXT", "MTEXT"):
+            continue
+
+        scanned += 1
+        layer = str(e.dxf.layer)
+
+        if tag_cfg.layers and layer not in tag_cfg.layers:
+            skipped_layer += 1
+            continue
+        if tag_cfg.exclude_layers and layer in tag_cfg.exclude_layers:
+            skipped_layer += 1
+            continue
+
+        if e.dxftype() == "MTEXT":
+            try:
+                text = e.plain_mtext().strip()
+            except Exception:
+                text = str(e.dxf.text).strip()
+            # Remove remaining MTEXT formatting codes
+            text = re.sub(r'\\\w', '', text)
+        else:
+            text = str(e.dxf.text).strip()
+
+        matches = regex.findall(text)
+        if not matches:
+            no_match += 1
+            continue
+
+        for prefix, number in matches:
+            matched_total += 1
+            norm_prefix = prefix.lower()
+            length_mm = float(number) * 10.0
+
+            width_mm = tag_cfg.default_width_mm
+            if tag_cfg.prefix_width_map and norm_prefix in tag_cfg.prefix_width_map:
+                width_mm = tag_cfg.prefix_width_map[norm_prefix]
+
+            items.append(
+                PanelItem(
+                    panel_type=cfg.defaults.panel_type or f"Tag {norm_prefix}",
+                    ral_out=cfg.defaults.ral_out,
+                    metal_out_mm=cfg.defaults.metal_out_mm,
+                    profile_out=cfg.defaults.profile_out,
+                    coating_out=cfg.defaults.coating_out,
+                    ral_in=cfg.defaults.ral_in,
+                    metal_in_mm=cfg.defaults.metal_in_mm,
+                    profile_in=cfg.defaults.profile_in,
+                    coating_in=cfg.defaults.coating_in,
+                    length_mm=length_mm,
+                    width_mm=width_mm,
+                    thickness_mm=cfg.defaults.thickness_mm,
+                    qty=1.0,
+                )
+            )
+
+    progress_cb(
+        f"TEXT/MTEXT просканировано: {scanned} | "
+        f"пропущено (слой): {skipped_layer} | "
+        f"без совпадений: {no_match} | "
+        f"найдено тегов: {matched_total}"
+    )
+
+    if not items:
+        progress_cb(
+            "⚠ Панелей не найдено. Проверьте:\n"
+            f"  • tag_regex в конфиге: {tag_cfg.tag_regex!r}\n"
+            f"  • layers в конфиге: {list(tag_cfg.layers) or '(все слои)'}\n"
+            f"  • Используйте «Автоопределение» чтобы увидеть слои и примеры текстов в файле"
+        )
+
+    return items
+
+
+# ---------------------------------------------------------------------------
+# Attribute-based extraction
+# ---------------------------------------------------------------------------
+
+def _extract_panels_attribute(
+    path: Path,
+    cfg: Config,
+    *,
+    progress_cb: ProgressCb = _noop,
+    stop_event: threading.Event | None = None,
+) -> list[PanelItem]:
+    doc = _load_doc(path, progress_cb=progress_cb)
+    _check_stop(stop_event)
+
+    msp = doc.modelspace()
+    items: list[PanelItem] = []
+    rule_names = {r.block_name for r in cfg.panel_blocks}
+
+    progress_cb(f"Поиск INSERT-блоков: {sorted(rule_names)}")
+    scanned = 0
+    matched = 0
+
     for ins in msp.query("INSERT"):
+        _check_stop(stop_event)
+        scanned += 1
         block_name = str(ins.dxf.name)
         rule = _find_rule(cfg, block_name)
         if not rule:
             continue
 
+        matched += 1
         attrs = {str(a.dxf.tag): str(a.dxf.text) for a in getattr(ins, "attribs", [])}
         array_mult = 1.0
         for k in ["row_count", "col_count"]:
@@ -165,74 +510,43 @@ def extract_panels_from_dxf(path: Path, cfg: Config) -> list[PanelItem]:
             )
         )
 
+    progress_cb(f"INSERT просканировано: {scanned} | совпадений с конфигом: {matched}")
     items = [i for i in items if i.qty and i.length_mm]
+
+    if not items:
+        progress_cb(
+            "⚠ Панелей не найдено. Проверьте:\n"
+            f"  • block_name в конфиге: {sorted(rule_names)}\n"
+            f"  • Используйте «Автоопределение» чтобы увидеть блоки в файле\n"
+            f"  • Возможно, нужен другой режим (text_tags или dimension)"
+        )
+
     return items
 
 
-def extract_panels_from_tags(path: Path, cfg: Config) -> list[PanelItem]:
-    tag_cfg = cfg.tag_extraction
-    regex = re.compile(tag_cfg.tag_regex, re.IGNORECASE)
-    
-    doc = _load_doc(path, dwg_version=tag_cfg.dwg_load_version)
-    msp = doc.modelspace()
-    
-    items: list[PanelItem] = []
-    
-    for e in msp:
-        if e.dxftype() not in ('TEXT', 'MTEXT'):
-            continue
-            
-        layer = str(e.dxf.layer)
-        if tag_cfg.layers and layer not in tag_cfg.layers:
-            continue
-        if tag_cfg.exclude_layers and layer in tag_cfg.exclude_layers:
-            continue
-            
-        text = str(e.dxf.text).strip()
-        # Handle MTEXT formatting if necessary (simple removal of \P)
-        text = re.sub(r'\\P', '\n', text)
-        
-        matches = regex.findall(text)
-        for prefix, number in matches:
-            norm_prefix = prefix.lower()
-            length_mm = float(number) * 10.0
-            
-            # Determine width
-            width_mm = tag_cfg.default_width_mm
-            if tag_cfg.prefix_width_map and norm_prefix in tag_cfg.prefix_width_map:
-                width_mm = tag_cfg.prefix_width_map[norm_prefix]
-            
-            # Create item
-            items.append(
-                PanelItem(
-                    panel_type=cfg.defaults.panel_type or f"Tag {norm_prefix}",
-                    ral_out=cfg.defaults.ral_out,
-                    metal_out_mm=cfg.defaults.metal_out_mm,
-                    profile_out=cfg.defaults.profile_out,
-                    coating_out=cfg.defaults.coating_out,
-                    ral_in=cfg.defaults.ral_in,
-                    metal_in_mm=cfg.defaults.metal_in_mm,
-                    profile_in=cfg.defaults.profile_in,
-                    coating_in=cfg.defaults.coating_in,
-                    length_mm=length_mm,
-                    width_mm=width_mm,
-                    thickness_mm=cfg.defaults.thickness_mm,
-                    qty=1.0,
-                )
-            )
-            
-    return items
+# ---------------------------------------------------------------------------
+# Dimension-based extraction
+# ---------------------------------------------------------------------------
 
-
-def extract_panels_from_dimensions(path: Path, cfg: Config) -> list[PanelItem]:
+def extract_panels_from_dimensions(
+    path: Path,
+    cfg: Config,
+    *,
+    progress_cb: ProgressCb = _noop,
+    stop_event: threading.Event | None = None,
+) -> list[PanelItem]:
     dim_cfg = cfg.dimension_extraction
     if not dim_cfg.panel_types:
-        raise RuntimeError("dimension_extraction.enabled=true, но panel_types не задан")
+        raise RuntimeError(
+            "dimension_extraction.enabled=true, но panel_types не задан в конфиге."
+        )
 
     code_to_length = {pt.code: pt.length_mm for pt in dim_cfg.panel_types}
     marker_re = re.compile(dim_cfg.marker_text_regex)
 
-    doc = _load_doc(path, dwg_version=dim_cfg.dwg_load_version)
+    doc = _load_doc(path, dwg_version=dim_cfg.dwg_load_version, progress_cb=progress_cb)
+    _check_stop(stop_event)
+
     msp = doc.modelspace()
 
     def _in_include_bbox(x: float, y: float) -> bool:
@@ -243,8 +557,10 @@ def extract_panels_from_dimensions(path: Path, cfg: Config) -> list[PanelItem]:
                 return True
         return False
 
+    progress_cb(f"Поиск маркеров TEXT (regex: {dim_cfg.marker_text_regex!r})…")
     markers: list[tuple[float, float, float]] = []
     for t in msp.query("TEXT"):
+        _check_stop(stop_event)
         s = str(t.dxf.text).strip()
         m = marker_re.match(s)
         if not m:
@@ -258,7 +574,7 @@ def extract_panels_from_dimensions(path: Path, cfg: Config) -> list[PanelItem]:
         if _in_include_bbox(tx, ty):
             markers.append((length_mm, tx, ty))
 
-    marker_lengths = {m[0] for m in markers}
+    progress_cb(f"Маркеров найдено: {len(markers)}")
 
     tol = float(dim_cfg.measurement_tolerance_mm)
     w = float(dim_cfg.panel_width_mm)
@@ -270,10 +586,6 @@ def extract_panels_from_dimensions(path: Path, cfg: Config) -> list[PanelItem]:
         p2 = d.dxf.defpoint2
         p3 = d.dxf.defpoint3
         return (float(p3.x), float(p3.y), float(p2.x), float(p2.y))
-
-    def _seg_mid(seg: tuple[float, float, float, float]) -> tuple[float, float]:
-        x1, y1, x2, y2 = seg
-        return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
 
     def _seg_dir(seg: tuple[float, float, float, float]) -> tuple[float, float] | None:
         x1, y1, x2, y2 = seg
@@ -323,8 +635,10 @@ def extract_panels_from_dimensions(path: Path, cfg: Config) -> list[PanelItem]:
     def _assign_marker(x: float, y: float) -> float:
         if not markers:
             raise RuntimeError(
-                "Не найдено маркеров панелей в TEXT для dimension_extraction. "
-                "Проверьте marker_text_regex и panel_types в конфиге."
+                "Нет маркеров TEXT для dimension-режима.\n"
+                f"  • marker_text_regex: {dim_cfg.marker_text_regex!r}\n"
+                f"  • panel_types: {[pt.code for pt in dim_cfg.panel_types]}\n"
+                f"  • include_bboxes: {dim_cfg.include_bboxes or '(весь чертёж)'}"
             )
         best_len = markers[0][0]
         best_d = 1e30
@@ -337,10 +651,13 @@ def extract_panels_from_dimensions(path: Path, cfg: Config) -> list[PanelItem]:
                 best_len = length_mm
         return best_len
 
+    # Collect height dimensions
     height_dims: list[tuple[float, tuple[float, float], tuple[float, float], tuple[float, float, float, float]]] = []
     if dim_cfg.use_height_dimensions:
         known_lengths = sorted({float(pt.length_mm) for pt in dim_cfg.panel_types})
+        progress_cb(f"Сканирование height-DIMENSION (известные длины: {known_lengths})…")
         for d in msp.query("DIMENSION"):
+            _check_stop(stop_event)
             if str(d.dxf.layer) not in dim_cfg.dimension_layers:
                 continue
             try:
@@ -365,13 +682,12 @@ def extract_panels_from_dimensions(path: Path, cfg: Config) -> list[PanelItem]:
             hy = float(pt.y)
             if _in_include_bbox(hx, hy):
                 height_dims.append((matched, (hx, hy), dir_v, seg))
+        progress_cb(f"Height-DIMENSION найдено: {len(height_dims)}")
 
     def _assign_height_dim(
         run_pt: tuple[float, float], run_dir: tuple[float, float] | None
     ) -> float | None:
-        if not height_dims:
-            return None
-        if run_dir is None:
+        if not height_dims or run_dir is None:
             return None
         angle_tol = float(dim_cfg.height_perpendicular_tolerance_deg)
         sin_tol = math.sin(math.radians(angle_tol))
@@ -392,16 +708,21 @@ def extract_panels_from_dimensions(path: Path, cfg: Config) -> list[PanelItem]:
             if score < best_score:
                 best_score = score
                 best_len = length_mm
-
         return best_len
 
     def _pt_key(x: float, y: float) -> tuple[int, int]:
         return (int(round(x)), int(round(y)))
 
+    progress_cb(f"Сканирование DIMENSION на слоях: {list(dim_cfg.dimension_layers)}…")
     run_segments: dict[tuple[tuple[int, int], tuple[int, int]], tuple[float, float, tuple[float, float] | None]] = {}
+    dim_scanned = 0
+    dim_matched = 0
+
     for d in msp.query("DIMENSION"):
+        _check_stop(stop_event)
         if str(d.dxf.layer) not in dim_cfg.dimension_layers:
             continue
+        dim_scanned += 1
         n = _dim_to_panels(d)
         if n is None or n <= 0:
             continue
@@ -411,6 +732,7 @@ def extract_panels_from_dimensions(path: Path, cfg: Config) -> list[PanelItem]:
         seg = _seg_from_dim(d)
         if seg is None:
             continue
+        dim_matched += 1
         run_dir = _seg_dir(seg)
         x1, y1, x2, y2 = seg
         dx = (x2 - x1) / float(n)
@@ -427,8 +749,15 @@ def extract_panels_from_dimensions(path: Path, cfg: Config) -> list[PanelItem]:
             my = (ay + by) / 2.0
             run_segments.setdefault(key, (mx, my, run_dir))
 
+    progress_cb(
+        f"DIMENSION на целевых слоях: {dim_scanned} | "
+        f"распознано как панели: {dim_matched} | "
+        f"сегментов (дедуп): {len(run_segments)}"
+    )
+
     counts: dict[float, int] = {}
     for mx, my, run_dir in run_segments.values():
+        _check_stop(stop_event)
         length_mm = None
         if dim_cfg.use_height_dimensions:
             length_mm = _assign_height_dim((mx, my), run_dir)
@@ -468,6 +797,15 @@ def extract_panels_from_dimensions(path: Path, cfg: Config) -> list[PanelItem]:
                 thickness_mm=float(cfg.defaults.thickness_mm),
                 qty=float(qty),
             )
+        )
+
+    if not items:
+        progress_cb(
+            "⚠ Панелей не найдено в dimension-режиме. Проверьте:\n"
+            f"  • dimension_layers в конфиге: {list(dim_cfg.dimension_layers)}\n"
+            f"  • panel_types: {[pt.code for pt in dim_cfg.panel_types]}\n"
+            f"  • include_bboxes: {dim_cfg.include_bboxes or '(весь чертёж)'}\n"
+            f"  • marker_text_regex: {dim_cfg.marker_text_regex!r}"
         )
 
     return items
