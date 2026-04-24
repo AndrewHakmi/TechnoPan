@@ -557,10 +557,16 @@ def extract_panels_from_dimensions(
                 return True
         return False
 
-    progress_cb(f"Поиск маркеров TEXT (regex: {dim_cfg.marker_text_regex!r})…")
+    marker_layers = set(dim_cfg.marker_layers)
+    if marker_layers:
+        progress_cb(f"Поиск маркеров TEXT (regex: {dim_cfg.marker_text_regex!r}, слои: {sorted(marker_layers)})…")
+    else:
+        progress_cb(f"Поиск маркеров TEXT (regex: {dim_cfg.marker_text_regex!r}, слои: все)…")
     markers: list[tuple[float, float, float]] = []
     for t in msp.query("TEXT"):
         _check_stop(stop_event)
+        if marker_layers and str(t.dxf.layer) not in marker_layers:
+            continue
         s = str(t.dxf.text).strip()
         m = marker_re.match(s)
         if not m:

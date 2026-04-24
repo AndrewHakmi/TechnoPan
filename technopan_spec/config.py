@@ -53,6 +53,7 @@ class DimensionExtraction:
     enabled: bool = False
     dwg_load_version: str | None = "R12"
     marker_text_regex: str = r"^в\s*(\d+)$"
+    marker_layers: tuple[str, ...] = ()       # пусто = все слои
     dimension_layers: tuple[str, ...] = ("_РАЗМЕРЫ",)
     panel_width_mm: float = 1000
     measurement_tolerance_mm: float = 2
@@ -160,6 +161,7 @@ def load_config(path: Path) -> Config:
         enabled=bool(dim_raw.get("enabled", False)),
         dwg_load_version=_as_str(dim_raw.get("dwg_load_version", "R12")),
         marker_text_regex=str(dim_raw.get("marker_text_regex", r"^в\s*(\d+)$")),
+        marker_layers=tuple(str(x) for x in (dim_raw.get("marker_layers") or []) if str(x).strip()),
         dimension_layers=tuple(str(x) for x in (dim_raw.get("dimension_layers") or ["_РАЗМЕРЫ"]) if str(x).strip()),
         panel_width_mm=float(dim_raw.get("panel_width_mm", 1000)),
         measurement_tolerance_mm=float(dim_raw.get("measurement_tolerance_mm", 2)),

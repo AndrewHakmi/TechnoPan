@@ -18,6 +18,8 @@ dimension_extraction:
   enabled: true
   dwg_load_version: "R12"
   marker_text_regex: "^в\\s*(\\d+)$"
+  marker_layers:
+    - "_нумерация"
   dimension_layers:
     - "_РАЗМЕРЫ"
   panel_width_mm: 1000
