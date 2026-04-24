@@ -14,6 +14,8 @@ class PanelRow:
     idx: int
     supply_no: str
     panel_type: str
+    tag_prefix: str | None          # буква маркировки, напр. "п"
+    tag_number: int | None          # цифра маркировки, напр. 612
     ral_out: str | None
     metal_out_mm: float | None
     profile_out: str | None
@@ -32,6 +34,8 @@ class PanelRow:
 def _group_key(i: PanelItem) -> tuple:
     return (
         i.panel_type,
+        i.tag_prefix,
+        i.tag_number,
         i.ral_out,
         i.metal_out_mm,
         i.profile_out,
@@ -58,6 +62,8 @@ def build_panel_rows(items: list[PanelItem]) -> list[PanelRow]:
     for n, (key, agg) in enumerate(sorted(grouped.items(), key=lambda kv: kv[0]), start=1):
         (
             panel_type,
+            tag_prefix,
+            tag_number,
             ral_out,
             metal_out_mm,
             profile_out,
@@ -76,6 +82,8 @@ def build_panel_rows(items: list[PanelItem]) -> list[PanelRow]:
                 idx=n,
                 supply_no="ПК-",
                 panel_type=str(panel_type),
+                tag_prefix=tag_prefix,
+                tag_number=tag_number,
                 ral_out=ral_out,
                 metal_out_mm=metal_out_mm,
                 profile_out=profile_out,
@@ -103,6 +111,8 @@ def write_spec_xlsx(path: Path, rows: list[PanelRow], title: str) -> None:
         "№ п.п.",
         "№ поставки",
         "Тип панели",
+        "Маркировка (буква)",
+        "Маркировка (номер)",
         "RAL наруж",
         "Толщина металла наруж, мм",
         "Профилирование наруж",
@@ -133,6 +143,8 @@ def write_spec_xlsx(path: Path, rows: list[PanelRow], title: str) -> None:
             row.idx,
             row.supply_no,
             row.panel_type,
+            row.tag_prefix,
+            row.tag_number,
             row.ral_out,
             row.metal_out_mm,
             row.profile_out,
@@ -155,10 +167,10 @@ def write_spec_xlsx(path: Path, rows: list[PanelRow], title: str) -> None:
     total_row = 4 + len(rows)
     ws.cell(row=total_row, column=1, value="ИТОГО")
     ws.cell(row=total_row, column=1).font = Font(bold=True)
-    ws.cell(row=total_row, column=13, value=round(total_qty, 3))
-    ws.cell(row=total_row, column=14, value=round(total_area, 3))
-    ws.cell(row=total_row, column=13).font = Font(bold=True)
-    ws.cell(row=total_row, column=14).font = Font(bold=True)
+    ws.cell(row=total_row, column=15, value=round(total_qty, 3))
+    ws.cell(row=total_row, column=16, value=round(total_area, 3))
+    ws.cell(row=total_row, column=15).font = Font(bold=True)
+    ws.cell(row=total_row, column=16).font = Font(bold=True)
 
     ws.freeze_panes = "A4"
 

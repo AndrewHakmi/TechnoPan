@@ -33,6 +33,8 @@ class PanelItem:
     width_mm: float
     thickness_mm: float
     qty: float
+    tag_prefix: str | None = None   # буква из маркировки, напр. "п"
+    tag_number: int | None = None   # цифра из маркировки, напр. 612
 
 
 def _coerce_float(v: Any) -> float | None:
@@ -350,7 +352,8 @@ def extract_panels_from_tags(
     stop_event: threading.Event | None = None,
 ) -> list[PanelItem]:
     tag_cfg = cfg.tag_extraction
-    regex = re.compile(tag_cfg.tag_regex, re.IGNORECASE)
+    regex = re.compile(tag_cfg.tag_regex, re.IGNORECASE | re.UNICODE)
+    ral_layer_re = re.compile(tag_cfg.layer_ral_regex, re.IGNORECASE) if tag_cfg.layer_ral_regex else None
 
     doc = _load_doc(path, dwg_version=tag_cfg.dwg_load_version, progress_cb=progress_cb)
     _check_stop(stop_event)
@@ -358,7 +361,14 @@ def extract_panels_from_tags(
     msp = doc.modelspace()
     items: list[PanelItem] = []
 
-    progress_cb("Поиск текстовых тегов (TEXT/MTEXT)…")
+    layer_prefixes_lo = [p.lower() for p in tag_cfg.layer_prefixes]
+
+    if tag_cfg.layers:
+        progress_cb(f"Поиск тегов: слои (точно): {list(tag_cfg.layers)}")
+    elif layer_prefixes_lo:
+        progress_cb(f"Поиск тегов: слои с префиксом: {list(tag_cfg.layer_prefixes)}")
+    else:
+        progress_cb("Поиск текстовых тегов (TEXT/MTEXT) на всех слоях…")
     scanned = 0
     skipped_layer = 0
     no_match = 0
@@ -372,12 +382,25 @@ def extract_panels_from_tags(
         scanned += 1
         layer = str(e.dxf.layer)
 
-        if tag_cfg.layers and layer not in tag_cfg.layers:
-            skipped_layer += 1
-            continue
+        # Фильтр слоёв: точное совпадение ИЛИ префиксное, если заданы
+        if tag_cfg.layers or layer_prefixes_lo:
+            exact_ok = bool(tag_cfg.layers) and layer in tag_cfg.layers
+            prefix_ok = bool(layer_prefixes_lo) and any(
+                layer.lower().startswith(p) for p in layer_prefixes_lo
+            )
+            if not (exact_ok or prefix_ok):
+                skipped_layer += 1
+                continue
         if tag_cfg.exclude_layers and layer in tag_cfg.exclude_layers:
             skipped_layer += 1
             continue
+
+        # RAL из имени слоя (напр. "Нумерация RAL 7024" → "7024")
+        layer_ral: str | None = None
+        if ral_layer_re:
+            m_ral = ral_layer_re.search(layer)
+            if m_ral:
+                layer_ral = m_ral.group(1).strip()
 
         if e.dxftype() == "MTEXT":
             try:
@@ -406,7 +429,7 @@ def extract_panels_from_tags(
             items.append(
                 PanelItem(
                     panel_type=cfg.defaults.panel_type or f"Tag {norm_prefix}",
-                    ral_out=cfg.defaults.ral_out,
+                    ral_out=layer_ral or cfg.defaults.ral_out,
                     metal_out_mm=cfg.defaults.metal_out_mm,
                     profile_out=cfg.defaults.profile_out,
                     coating_out=cfg.defaults.coating_out,
@@ -418,6 +441,8 @@ def extract_panels_from_tags(
                     width_mm=width_mm,
                     thickness_mm=cfg.defaults.thickness_mm,
                     qty=1.0,
+                    tag_prefix=norm_prefix,
+                    tag_number=int(number),
                 )
             )
 

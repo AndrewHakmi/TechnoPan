@@ -77,6 +77,8 @@ class TagExtraction:
     prefix_width_map: dict[str, float] | None = None
     default_width_mm: float = 1190
     layers: tuple[str, ...] = ()
+    layer_prefixes: tuple[str, ...] = ()   # регистронезависимое совпадение по началу имени слоя
+    layer_ral_regex: str | None = None     # regex для извлечения RAL из имени слоя, группа 1 = значение
     exclude_layers: tuple[str, ...] = ()
 
 
@@ -191,6 +193,8 @@ def load_config(path: Path) -> Config:
         prefix_width_map=tag_prefix_map,
         default_width_mm=float(tag_raw.get("default_width_mm", 1190)),
         layers=tuple(str(x) for x in (tag_raw.get("layers") or []) if str(x).strip()),
+        layer_prefixes=tuple(str(x) for x in (tag_raw.get("layer_prefixes") or []) if str(x).strip()),
+        layer_ral_regex=_as_str(tag_raw.get("layer_ral_regex")),
         exclude_layers=tuple(str(x) for x in (tag_raw.get("exclude_layers") or []) if str(x).strip()),
     )
 

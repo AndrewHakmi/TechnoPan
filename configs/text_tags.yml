@@ -4,18 +4,18 @@ defaults:
   thickness_mm: 150
   qty: 1
   panel_type: "ТП СПСК"
-  ral_out: "7024"
+  ral_in: "9003"
   metal_out_mm: 0.5
   coating_out: "PE"
-  ral_in: "9003"
   metal_in_mm: 0.5
   coating_in: "PE"
 
 tag_extraction:
   enabled: true
   dwg_load_version: "2018"
-  # Matches "п 612", "с-598", "Т 100" etc.
-  tag_regex: "\\b([пстc])\\s*[-]?\\s*(\\d{2,4})\\b"
+  # Две группы: (буква)(номер), напр. "п 612", "П612", "с-598"
+  tag_regex: "([пПсСтТcCвВ])\\s*[-]?\\s*(\\d{2,4})"
+  # Буква → ширина панели
   prefix_width_map:
     "п": 1190
     "p": 1190
@@ -23,7 +23,12 @@ tag_extraction:
     "c": 1000
     "т": 1000
     "t": 1000
+    "в": 1000
   default_width_mm: 1190
-  # Leave empty to scan all layers, or specify list
-  layers: [] 
+  # Сопоставление слоёв по префиксу (регистронезависимо)
+  # Охватывает: "Нумерация", "Нумерация RAL 7024", "Нумерация 1000" и т.д.
+  layer_prefixes:
+    - "Нумерация"
+  # Извлечение RAL из имени слоя: "Нумерация RAL 7024" → ral_out = "7024"
+  layer_ral_regex: "RAL\\s*(\\d+)"
   exclude_layers: []

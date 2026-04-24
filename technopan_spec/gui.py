@@ -28,7 +28,9 @@ _CONFIGS_DIR = _BASE_DIR / "configs"
 # Table column definitions:  (PanelRow attr, header, min-width px)
 # ---------------------------------------------------------------------------
 _COLUMNS: list[tuple[str, str, int]] = [
-    ("panel_type",    "Тип панели",    160),
+    ("panel_type",    "Тип панели",    140),
+    ("tag_prefix",    "Букв.",          50),
+    ("tag_number",    "Номер",          60),
     ("length_mm",     "Длина, мм",      80),
     ("width_mm",      "Ширина, мм",     80),
     ("thickness_mm",  "Толщина, мм",    80),
@@ -61,6 +63,8 @@ class _RowWidget:
 
         values = [
             panel_row.panel_type,
+            panel_row.tag_prefix or "—",
+            panel_row.tag_number if panel_row.tag_number is not None else "—",
             int(panel_row.length_mm),
             int(panel_row.width_mm),
             int(panel_row.thickness_mm),
