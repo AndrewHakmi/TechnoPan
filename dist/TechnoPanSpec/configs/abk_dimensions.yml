@@ -1,0 +1,46 @@
+defaults:
+  panel_type: "ТП ПСМ"
+  width_mm: 1000
+  thickness_mm: 80
+  qty: 1
+  ral_out: "9003"
+  metal_out_mm: 0.5
+  profile_out: "стандарт"
+  coating_out: "ПЭ"
+  ral_in: "9003"
+  metal_in_mm: 0.5
+  profile_in: "стандарт"
+  coating_in: "ПЭ"
+
+panel_blocks: []
+
+dimension_extraction:
+  enabled: true
+  dwg_load_version: "R12"
+  marker_text_regex: "^в\\s*(\\d+)$"
+  marker_layers:
+    - "_нумерация"
+  dimension_layers:
+    - "_РАЗМЕРЫ"
+  panel_width_mm: 1000
+  measurement_tolerance_mm: 2
+  distance_y_weight: 1.0
+  use_height_dimensions: true
+  height_assign_radius_mm: 50000
+  height_perpendicular_tolerance_deg: 20
+  height_max_perp_mm: 12000
+  height_max_along_mm: 20000
+  height_along_weight: 0.05
+  max_marker_distance_mm: null
+  include_bboxes:
+    - minx: 70000
+      miny: -190000
+      maxx: 390000
+      maxy: -135000
+  panel_types:
+    - code: "346"
+      length_mm: 3460
+    - code: "344"
+      length_mm: 3445
+    - code: "321"
+      length_mm: 3210

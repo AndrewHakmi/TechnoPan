@@ -56,7 +56,9 @@ def build_panel_rows(items: list[PanelItem]) -> list[PanelRow]:
         key = _group_key(i)
         g = grouped.setdefault(key, {"qty": 0.0, "area": 0.0})
         g["qty"] += float(i.qty)
-        g["area"] += (float(i.length_mm) * float(i.width_mm) / 1_000_000.0) * float(i.qty)
+        # Round area per panel to 3 decimals first to match manual Excel behavior
+        panel_area = round(float(i.length_mm) * float(i.width_mm) / 1_000_000.0, 3)
+        g["area"] += panel_area * float(i.qty)
 
     rows: list[PanelRow] = []
     for n, (key, agg) in enumerate(sorted(grouped.items(), key=lambda kv: kv[0]), start=1):
