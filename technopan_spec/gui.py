@@ -47,13 +47,15 @@ class _RowWidget:
     def __init__(self, parent: ctk.CTkScrollableFrame, row_idx: int, panel_row, on_toggle):
         self.row = panel_row
         self.var = BooleanVar(value=True)
+        self.on_toggle = on_toggle
+        self.entries = {}
 
         bg = ("gray90", "gray20") if row_idx % 2 == 0 else ("gray85", "gray17")
         self.frame = ctk.CTkFrame(parent, fg_color=bg, corner_radius=0)
         self.frame.grid(row=row_idx, column=0, sticky="ew")
-        self.frame.grid_columnconfigure(0, minsize=34)
+        self.frame.grid_columnconfigure(0, minsize=34, weight=0)
         for ci, (_, _, w) in enumerate(_COLUMNS, start=1):
-            self.frame.grid_columnconfigure(ci, minsize=w)
+            self.frame.grid_columnconfigure(ci, minsize=w, weight=1)
 
         self.cb = ctk.CTkCheckBox(
             self.frame, text="", variable=self.var,
@@ -61,23 +63,72 @@ class _RowWidget:
         )
         self.cb.grid(row=0, column=0, padx=(6, 2), pady=3)
 
-        values = [
-            panel_row.panel_type,
-            panel_row.tag_prefix or "—",
-            panel_row.tag_number if panel_row.tag_number is not None else "—",
-            int(panel_row.length_mm),
-            int(panel_row.width_mm),
-            int(panel_row.thickness_mm),
-            panel_row.ral_out or "—",
-            panel_row.ral_in or "—",
-            panel_row.qty,
-            panel_row.area_m2_total,
-        ]
-        for ci, (val, (_, _, w)) in enumerate(zip(values, _COLUMNS), start=1):
-            ctk.CTkLabel(
-                self.frame, text=str(val),
-                width=w - 4, anchor="center",
-            ).grid(row=0, column=ci, padx=2, pady=3)
+        values = {
+            "panel_type": panel_row.panel_type,
+            "tag_prefix": panel_row.tag_prefix or "",
+            "tag_number": str(panel_row.tag_number) if panel_row.tag_number is not None else "",
+            "length_mm": str(int(panel_row.length_mm)),
+            "width_mm": str(int(panel_row.width_mm)),
+            "thickness_mm": str(int(panel_row.thickness_mm)),
+            "ral_out": panel_row.ral_out or "",
+            "ral_in": panel_row.ral_in or "",
+            "qty": str(panel_row.qty),
+            "area_m2_total": str(panel_row.area_m2_total),
+        }
+
+        for ci, (col_id, _, w) in enumerate(_COLUMNS, start=1):
+            val = values[col_id]
+            entry = ctk.CTkEntry(
+                self.frame, 
+                width=w - 4, 
+                height=24,
+                corner_radius=0,
+                border_width=0,
+                fg_color="transparent",
+                justify="center"
+            )
+            entry.insert(0, str(val))
+            entry.grid(row=0, column=ci, padx=2, pady=3, sticky="ew")
+            self.entries[col_id] = entry
+            
+            # Attach events to numeric fields to recalculate area
+            if col_id in ("length_mm", "width_mm", "qty"):
+                entry.bind("<KeyRelease>", self._recalc_area)
+
+    def _recalc_area(self, event=None):
+        try:
+            length = float(self.entries["length_mm"].get() or 0)
+            width = float(self.entries["width_mm"].get() or 0)
+            qty = float(self.entries["qty"].get() or 0)
+            # Match the rounding behavior in spec.py
+            panel_area = round(length * width / 1_000_000.0, 3)
+            area = round(panel_area * qty, 3)
+            
+            self.entries["area_m2_total"].delete(0, "end")
+            self.entries["area_m2_total"].insert(0, str(area))
+            self.on_toggle()
+        except ValueError:
+            pass
+
+    def get_updated_row(self):
+        import dataclasses
+        kwargs = {}
+        for col_id, entry in self.entries.items():
+            val = entry.get().strip()
+            if col_id in ("length_mm", "width_mm", "thickness_mm", "qty", "area_m2_total"):
+                try:
+                    kwargs[col_id] = float(val) if val else 0.0
+                except ValueError:
+                    kwargs[col_id] = 0.0
+            elif col_id == "tag_number":
+                try:
+                    kwargs[col_id] = int(val) if val else None
+                except ValueError:
+                    kwargs[col_id] = None
+            else:
+                kwargs[col_id] = val if val else None
+                
+        return dataclasses.replace(self.row, **kwargs)
 
 
 class App(ctk.CTk):
@@ -207,13 +258,13 @@ class App(ctk.CTk):
         # Table header
         hdr = ctk.CTkFrame(mf, corner_radius=4)
         hdr.grid(row=6, column=0, sticky="ew", padx=4)
-        hdr.grid_columnconfigure(0, minsize=34)
+        hdr.grid_columnconfigure(0, minsize=34, weight=0)
         for ci, (_, label, w) in enumerate(_COLUMNS, start=1):
-            hdr.grid_columnconfigure(ci, minsize=w)
+            hdr.grid_columnconfigure(ci, minsize=w, weight=1)
             ctk.CTkLabel(
                 hdr, text=label, width=w - 4,
                 font=ctk.CTkFont(weight="bold"), anchor="center",
-            ).grid(row=0, column=ci, padx=2, pady=6)
+            ).grid(row=0, column=ci, padx=2, pady=6, sticky="ew")
 
         # Table body
         self._tbl_body = ctk.CTkScrollableFrame(mf, height=260, corner_radius=4)
@@ -422,8 +473,15 @@ class App(ctk.CTk):
     def _update_summary(self):
         selected = [rw for rw in self._row_widgets if rw.var.get()]
         total = len(self._row_widgets)
-        qty = sum(rw.row.qty for rw in selected)
-        area = sum(rw.row.area_m2_total for rw in selected)
+        qty = 0.0
+        area = 0.0
+        for rw in selected:
+            try:
+                qty += float(rw.entries["qty"].get() or 0)
+                area += float(rw.entries["area_m2_total"].get() or 0)
+            except ValueError:
+                pass
+
         self._lbl_summary.configure(
             text=(
                 f"Выбрано: {len(selected)} из {total}  │  "
@@ -436,7 +494,7 @@ class App(ctk.CTk):
         )
 
     def _get_selected_rows(self) -> list:
-        return [rw.row for rw in self._row_widgets if rw.var.get()]
+        return [rw.get_updated_row() for rw in self._row_widgets if rw.var.get()]
 
     # ─────────────────────────────────────── extract
 
