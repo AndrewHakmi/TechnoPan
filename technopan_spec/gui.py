@@ -304,6 +304,23 @@ class App(ctk.CTk):
         self._entry_title.insert(0, "Коммерческое предложение")
         self._entry_title.grid(row=0, column=3, sticky="ew")
 
+        # Columns selection
+        col_frame = ctk.CTkFrame(mf, fg_color="transparent")
+        col_frame.grid(row=11, column=0, sticky="ew", padx=4, pady=(8, 4))
+        ctk.CTkLabel(col_frame, text="Включить столбцы в Excel:", anchor="w", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
+        
+        self._column_vars = {}
+        from technopan_spec.spec import EXPORT_COLUMNS
+        col_grid = ctk.CTkFrame(col_frame, fg_color="transparent")
+        col_grid.grid(row=1, column=0, sticky="ew")
+        
+        # 4 columns for checkboxes
+        for i, (col_id, col_name, _) in enumerate(EXPORT_COLUMNS):
+            var = BooleanVar(value=True)
+            self._column_vars[col_id] = var
+            cb = ctk.CTkCheckBox(col_grid, text=col_name, variable=var)
+            cb.grid(row=i // 4, column=i % 4, sticky="w", padx=10, pady=5)
+
         self._btn_generate = ctk.CTkButton(
             mf,
             text="СГЕНЕРИРОВАТЬ EXCEL",
@@ -312,11 +329,11 @@ class App(ctk.CTk):
             state="disabled",
             command=self._start_generate,
         )
-        self._btn_generate.grid(row=11, column=0, sticky="ew", padx=4, pady=(10, 4))
+        self._btn_generate.grid(row=12, column=0, sticky="ew", padx=4, pady=(10, 4))
 
         # ── Log console ──────────────────────────────────────────────────────
         log_hdr = ctk.CTkFrame(mf, fg_color="transparent")
-        log_hdr.grid(row=12, column=0, sticky="ew", padx=4, pady=(12, 2))
+        log_hdr.grid(row=13, column=0, sticky="ew", padx=4, pady=(12, 2))
         ctk.CTkLabel(log_hdr, text="Журнал:", anchor="w").grid(row=0, column=0, sticky="w")
         ctk.CTkButton(
             log_hdr, text="Очистить", width=80, height=24,
@@ -324,7 +341,7 @@ class App(ctk.CTk):
         ).grid(row=0, column=1, padx=(8, 0))
 
         self._console = ctk.CTkTextbox(mf, height=180, state="disabled")
-        self._console.grid(row=13, column=0, sticky="ew", padx=4, pady=(0, 8))
+        self._console.grid(row=14, column=0, sticky="ew", padx=4, pady=(0, 8))
 
     # ─────────────────────────────────────── helpers
 
@@ -609,11 +626,13 @@ class App(ctk.CTk):
         out_path = out_folder / filename
         title = self._entry_title.get().strip() or "Коммерческое предложение"
 
+        active_cols = [col_id for col_id, var in self._column_vars.items() if var.get()]
+
         self._log("─" * 40)
         self._log(f"Экспорт: {len(rows)} строк → {out_path}")
         try:
             from technopan_spec.spec import write_spec_xlsx
-            write_spec_xlsx(out_path, rows, title=title)
+            write_spec_xlsx(out_path, rows, title=title, active_columns=active_cols)
             self._log(f"✓ Файл сохранён: {out_path}")
             self.after(0, lambda: messagebox.showinfo("Готово", f"Файл сохранён:\n{out_path}"))
         except Exception as exc:

@@ -104,31 +104,43 @@ def build_panel_rows(items: list[PanelItem]) -> list[PanelRow]:
     return rows
 
 
-def write_spec_xlsx(path: Path, rows: list[PanelRow], title: str) -> None:
+EXPORT_COLUMNS = [
+    ("idx", "№ п.п.", 8),
+    ("supply_no", "№ поставки", 12),
+    ("panel_type", "Тип панели", 20),
+    ("tag_prefix", "Маркировка (буква)", 18),
+    ("tag_number", "Маркировка (номер)", 18),
+    ("ral_out", "RAL наруж", 18),
+    ("metal_out_mm", "Толщина металла наруж, мм", 18),
+    ("profile_out", "Профилирование наруж", 18),
+    ("ral_in", "RAL внутр", 18),
+    ("metal_in_mm", "Толщина металла внутр, мм", 18),
+    ("profile_in", "Профилирование внутр", 18),
+    ("length_mm", "Длина, мм", 18),
+    ("width_mm", "Ширина, мм", 18),
+    ("thickness_mm", "Толщина, мм", 18),
+    ("qty", "Кол-во, шт.", 18),
+    ("area_m2_total", "Площадь, м2 общая", 18),
+    ("coating_out", "Покрытие наруж", 18),
+    ("coating_in", "Покрытие внутр", 18),
+]
+
+def write_spec_xlsx(path: Path, rows: list[PanelRow], title: str, active_columns: list[str] | None = None) -> None:
     wb = Workbook()
     ws = wb.active
     ws.title = "Панели"
 
-    headers = [
-        "№ п.п.",
-        "№ поставки",
-        "Тип панели",
-        "Маркировка (буква)",
-        "Маркировка (номер)",
-        "RAL наруж",
-        "Толщина металла наруж, мм",
-        "Профилирование наруж",
-        "RAL внутр",
-        "Толщина металла внутр, мм",
-        "Профилирование внутр",
-        "Длина, мм",
-        "Ширина, мм",
-        "Толщина, мм",
-        "Кол-во, шт.",
-        "Площадь, м2 общая",
-        "Покрытие наруж",
-        "Покрытие внутр",
-    ]
+    if active_columns is None:
+        active_columns = [c[0] for c in EXPORT_COLUMNS]
+
+    # Filter columns
+    cols_to_write = [c for c in EXPORT_COLUMNS if c[0] in active_columns]
+    headers = [c[1] for c in cols_to_write]
+    col_ids = [c[0] for c in cols_to_write]
+
+    if not headers:
+        wb.save(path)
+        return
 
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
     ws.cell(row=1, column=1, value=title)
@@ -141,46 +153,33 @@ def write_spec_xlsx(path: Path, rows: list[PanelRow], title: str) -> None:
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     for r, row in enumerate(rows, start=4):
-        values = [
-            row.idx,
-            row.supply_no,
-            row.panel_type,
-            row.tag_prefix,
-            row.tag_number,
-            row.ral_out,
-            row.metal_out_mm,
-            row.profile_out,
-            row.ral_in,
-            row.metal_in_mm,
-            row.profile_in,
-            row.length_mm,
-            row.width_mm,
-            row.thickness_mm,
-            row.qty,
-            row.area_m2_total,
-            row.coating_out,
-            row.coating_in,
-        ]
-        for c, v in enumerate(values, start=1):
-            ws.cell(row=r, column=c, value=v)
+        for c, col_id in enumerate(col_ids, start=1):
+            val = getattr(row, col_id, None)
+            ws.cell(row=r, column=c, value=val)
 
-    total_qty = sum(r.qty for r in rows)
-    total_area = sum(r.area_m2_total for r in rows)
     total_row = 4 + len(rows)
     ws.cell(row=total_row, column=1, value="ИТОГО")
     ws.cell(row=total_row, column=1).font = Font(bold=True)
-    ws.cell(row=total_row, column=15, value=round(total_qty, 3))
-    ws.cell(row=total_row, column=16, value=round(total_area, 3))
-    ws.cell(row=total_row, column=15).font = Font(bold=True)
-    ws.cell(row=total_row, column=16).font = Font(bold=True)
+    
+    # Place totals in the correct columns
+    if "qty" in col_ids:
+        c_idx = col_ids.index("qty") + 1
+        total_qty = sum(r.qty for r in rows)
+        ws.cell(row=total_row, column=c_idx, value=round(total_qty, 3))
+        ws.cell(row=total_row, column=c_idx).font = Font(bold=True)
+        
+    if "area_m2_total" in col_ids:
+        c_idx = col_ids.index("area_m2_total") + 1
+        total_area = sum(r.area_m2_total for r in rows)
+        ws.cell(row=total_row, column=c_idx, value=round(total_area, 3))
+        ws.cell(row=total_row, column=c_idx).font = Font(bold=True)
 
     ws.freeze_panes = "A4"
 
-    for col in range(1, len(headers) + 1):
-        ws.column_dimensions[chr(64 + col)].width = 18
-    ws.column_dimensions["A"].width = 8
-    ws.column_dimensions["B"].width = 12
-    ws.column_dimensions["C"].width = 20
+    from openpyxl.utils import get_column_letter
+    for c, col_def in enumerate(cols_to_write, start=1):
+        width = col_def[2]
+        ws.column_dimensions[get_column_letter(c)].width = width
 
     wb.save(path)
 
