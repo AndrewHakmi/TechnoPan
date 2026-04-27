@@ -87,14 +87,11 @@ def _load_doc(
         return ezdxf.readfile(path)
 
     if ext in {".dwg", ".dxb"}:
-        from ezdxf.addons import odafc
+        from .odafc_utils import safe_convert_dwg_to_dxf
 
         win_path = resolve_odafc_win_exec_path()
         progress_cb(f"ODA File Converter: {'найден — ' + win_path if win_path else 'НЕ НАЙДЕН'}")
-        if win_path:
-            ezdxf.options.set("odafc-addon", "win_exec_path", win_path)
-
-        if not odafc.is_installed():
+        if not win_path:
             raise RuntimeError(
                 "Для чтения DWG требуется ODA File Converter.\n"
                 "Скачайте: https://www.opendesign.com/guestfiles/oda_file_converter\n"
@@ -102,12 +99,34 @@ def _load_doc(
             )
 
         progress_cb(f"Конвертация DWG → DXF (ODA)… это может занять 30–60 секунд")
-        if dwg_version:
-            doc = odafc.readfile(path, version=dwg_version)
-        else:
-            doc = odafc.readfile(path)
-        progress_cb("Конвертация завершена.")
-        return doc
+        
+        # Определяем версию ODAFC (ACAD2018 по умолчанию, если R12 не передан)
+        # В ezdxf R12 маппится на ACAD12, R2018 -> ACAD2018
+        oda_version = "ACAD2018"
+        if dwg_version == "R12":
+            oda_version = "ACAD12"
+        elif dwg_version == "R2018":
+            oda_version = "ACAD2018"
+        elif dwg_version:
+            # Пытаемся адаптировать, если передана другая версия
+            if dwg_version.startswith("R"):
+                oda_version = "ACAD" + dwg_version[1:]
+        
+        try:
+            dxf_path = safe_convert_dwg_to_dxf(path, out_version=oda_version)
+            progress_cb("Конвертация завершена. Загрузка DXF...")
+            doc = ezdxf.readfile(dxf_path)
+            
+            # Удаляем временный DXF файл
+            import shutil
+            try:
+                shutil.rmtree(dxf_path.parent, ignore_errors=True)
+            except Exception:
+                pass
+                
+            return doc
+        except Exception as e:
+            raise RuntimeError(f"Ошибка при конвертации DWG: {e}")
 
     raise ValueError(f"Неподдерживаемый формат входного файла: {ext}")
 

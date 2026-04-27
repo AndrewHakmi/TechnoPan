@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import tempfile
+import shutil
+from pathlib import Path
 
 
 def resolve_odafc_win_exec_path() -> str | None:
@@ -42,4 +46,62 @@ def resolve_odafc_win_exec_path() -> str | None:
                 return exe
 
     return None
+
+
+def safe_convert_dwg_to_dxf(dwg_path: Path, out_version: str = "ACAD2018") -> Path:
+    """
+    Безопасная конвертация DWG в DXF через ODA File Converter.
+    Избегает зависания (deadlock), которое есть во встроенном модуле ezdxf.addons.odafc
+    при запуске из PyInstaller windowed mode.
+    """
+    exe = resolve_odafc_win_exec_path()
+    if not exe:
+        raise RuntimeError("ODA File Converter не найден.")
+
+    # ODAFC требует абсолютных путей к директориям
+    dwg_abs = dwg_path.resolve()
+    in_folder = str(dwg_abs.parent)
+    filename = dwg_abs.name
+
+    tmp_dir = tempfile.mkdtemp(prefix="technopan_odafc_")
+    
+    # Аргументы ODAFC: InputFolder OutputFolder Version Format Recurse Audit [Filename]
+    cmd = [
+        exe,
+        in_folder,
+        tmp_dir,
+        out_version,
+        "DXF",
+        "0",  # Recurse
+        "1",  # Audit
+        filename
+    ]
+
+    try:
+        # Используем CREATE_NO_WINDOW чтобы скрыть консоль на Windows
+        # capture_output=True автоматически читает stdout/stderr и предотвращает deadlock
+        subprocess.run(
+            cmd,
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+            check=True
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Ошибка при конвертации ODAFC: {e.stderr.decode('utf-8', errors='ignore')}")
+    except Exception as e:
+        raise RuntimeError(f"Не удалось запустить ODAFC: {e}")
+
+    # Ищем результат в tmp_dir
+    dxf_name = dwg_abs.with_suffix(".dxf").name
+    result_path = Path(tmp_dir) / dxf_name
+
+    if not result_path.exists():
+        # Иногда ODAFC меняет регистр расширения
+        found = list(Path(tmp_dir).glob("*.[dD][xX][fF]"))
+        if found:
+            result_path = found[0]
+        else:
+            raise RuntimeError("Конвертация прошла без ошибок, но DXF файл не был создан.")
+
+    return result_path
 
